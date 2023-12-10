@@ -1,10 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use eframe::egui;
 use egui::Ui;
-use grammers_client::{client::chats::ParticipantIter, types::LoginToken, Client};
+use grammers_client::{
+    client::chats::ParticipantIter,
+    types::{LoginToken, Participant},
+    Client,
+};
 
 use telegram_group_scraper::{
     get_client, get_participants, Task, TaskResult, TaskSpawner, TaskType,
@@ -32,7 +36,8 @@ struct TelegramGroupInfoApp {
     chat_name: String,
     phone_number: String,
     otp_field: String,
-    result: Vec<(ParticipantIter, usize)>,
+    result: HashMap<String, (ParticipantIter, usize)>,
+    participants: HashMap<String, Participant>,
     telegram_state: TelegramState,
     spawner: TaskSpawner,
 
@@ -92,7 +97,8 @@ impl TelegramGroupInfoApp {
             chat_name: "".to_string(),
             phone_number: "".to_string(),
             otp_field: "".to_string(),
-            result: Vec::new(),
+            result: HashMap::new(),
+            participants: HashMap::new(),
             telegram_state: TelegramState::NeedOTP,
         }
     }
@@ -117,9 +123,8 @@ impl TelegramGroupInfoApp {
                 TaskResult::ValidateOTP(Some(_)) => {
                     self.telegram_state = TelegramState::LoggedIn;
                 }
-                TaskResult::GetParticipantsResult(Some(value)) => {
-                    println!("Got participants! {:?}", value.1);
-                    self.result.push(value);
+                TaskResult::GetParticipantsResult(chat_name, Some(value)) => {
+                    self.result.insert(chat_name, value);
                 }
                 _ => {}
             }
@@ -161,8 +166,11 @@ impl TelegramGroupInfoApp {
                 }
             });
             ui.separator();
-            for (i, result) in self.result.iter().enumerate() {
-                let msg = format!("There are {} participants in the group {}", result.1, i);
+            for (i, (chat_name, result)) in self.result.iter().enumerate() {
+                let msg = format!(
+                    "There are {} participants in the group {}",
+                    result.1, chat_name
+                );
                 println!("{msg}");
                 ui.label(msg);
                 ui.separator();

@@ -26,7 +26,7 @@ pub struct Task {
 pub enum TaskResult {
     OTP(Option<Option<LoginToken>>),
     ValidateOTP(Option<()>),
-    GetParticipantsResult(Option<(ParticipantIter, usize)>),
+    GetParticipantsResult(String, Option<(ParticipantIter, usize)>),
 }
 
 async fn handle_task(task: Task, client: GrammersClient) {
@@ -49,6 +49,7 @@ async fn handle_task(task: Task, client: GrammersClient) {
         TaskType::GetParticipants(chat_name) => {
             task.result
                 .send(TaskResult::GetParticipantsResult(
+                    chat_name.clone(),
                     get_participants(client, chat_name).await.ok(),
                 ))
                 .await
