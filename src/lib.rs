@@ -12,9 +12,9 @@ use tokio::sync::mpsc;
 type Client = Arc<Mutex<GrammersClient>>;
 
 pub enum TaskType {
-    RequestOTP(String), // phone number
+    RequestOTP(String),                   // phone number
     ValidateOTP(Arc<LoginToken>, String), // auth_token, otp
-                        // GetParticipants(String),         // group name
+    GetParticipants(String),              // group name
 }
 pub struct Task {
     // info that describes the task
@@ -26,7 +26,7 @@ pub struct Task {
 pub enum TaskResult {
     OTP(Option<Option<LoginToken>>),
     ValidateOTP(Option<()>),
-    // GetParticipants(TelegramResult<(ParticipantIter, usize)>),
+    GetParticipantsResult(Option<(ParticipantIter, usize)>),
 }
 
 async fn handle_task(task: Task, client: GrammersClient) {
@@ -42,6 +42,14 @@ async fn handle_task(task: Task, client: GrammersClient) {
             task.result
                 .send(TaskResult::ValidateOTP(
                     login(client, &token, &otp).await.ok(),
+                ))
+                .await
+                .expect("channel send fail");
+        }
+        TaskType::GetParticipants(chat_name) => {
+            task.result
+                .send(TaskResult::GetParticipantsResult(
+                    get_participants(client, chat_name).await.ok(),
                 ))
                 .await
                 .expect("channel send fail");

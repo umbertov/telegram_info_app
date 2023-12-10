@@ -35,7 +35,6 @@ struct TelegramGroupInfoApp {
     result: Vec<(ParticipantIter, usize)>,
     telegram_state: TelegramState,
     spawner: TaskSpawner,
-    client: Option<Client>,
 
     telegram_tx: tokio::sync::mpsc::Sender<TaskResult>,
     telegram_rx: tokio::sync::mpsc::Receiver<TaskResult>,
@@ -88,7 +87,7 @@ impl TelegramGroupInfoApp {
             spawner: TaskSpawner::new(),
             telegram_rx: recv,
             telegram_tx: send,
-            client: None,
+            // client: None,
             picked_path: None,
             chat_name: "".to_string(),
             phone_number: "".to_string(),
@@ -99,9 +98,9 @@ impl TelegramGroupInfoApp {
     }
     /// Checks if we got something in the channel, and changes state in that case.
     fn check_async_updates(&mut self) {
-        if let TelegramState::LoggedIn = self.telegram_state {
-            return;
-        }
+        // if let TelegramState::LoggedIn = self.telegram_state {
+        //     return;
+        // }
         if let Ok(msg) = self.telegram_rx.try_recv() {
             match msg {
                 TaskResult::OTP(otp_res) => match otp_res {
@@ -117,6 +116,10 @@ impl TelegramGroupInfoApp {
                 },
                 TaskResult::ValidateOTP(Some(_)) => {
                     self.telegram_state = TelegramState::LoggedIn;
+                }
+                TaskResult::GetParticipantsResult(Some(value)) => {
+                    println!("Got participants! {:?}", value.1);
+                    self.result.push(value);
                 }
                 _ => {}
             }
@@ -135,13 +138,17 @@ impl TelegramGroupInfoApp {
         }
 
         if let Some(picked_path) = &self.picked_path {
-            ui.horizontal(|ui| {
+            ui.vertical(|ui| {
                 ui.label("Picked folder:");
                 ui.monospace(picked_path);
                 if ui.button("Go").clicked() {
                     let lines: Vec<_> = self.chat_name.lines().collect();
                     for (i, chat_name) in lines.iter().enumerate() {
                         ui.monospace(format!("({}/{}) Doing {} ...", i, lines.len(), chat_name));
+                        self.spawner.spawn_task(Task {
+                            task_type: TaskType::GetParticipants(chat_name.to_string()),
+                            result: self.telegram_tx.clone(),
+                        });
                         // let maybe_participants =
                         //     get_participants(self.client.clone(), chat_name.to_string());
                         // match maybe_participants {
@@ -153,8 +160,12 @@ impl TelegramGroupInfoApp {
                     }
                 }
             });
-            for result in self.result.iter() {
-                ui.label(format!("There are {} participants in the group", result.1));
+            ui.separator();
+            for (i, result) in self.result.iter().enumerate() {
+                let msg = format!("There are {} participants in the group {}", result.1, i);
+                println!("{msg}");
+                ui.label(msg);
+                ui.separator();
             }
         }
     }
