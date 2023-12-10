@@ -21,7 +21,7 @@ use telegram_group_scraper::{
 #[derive(Default)]
 enum TelegramState {
     #[default]
-    InitClient,
+    // InitClient,
     NeedOTP, // phone number
     ValidateOTP(Arc<LoginToken>),
     LoggedIn,
@@ -35,7 +35,7 @@ struct TelegramGroupInfoApp {
     result: Vec<(ParticipantIter, usize)>,
     telegram_state: TelegramState,
     spawner: TaskSpawner,
-    client: Client,
+    client: Option<Client>,
 
     telegram_tx: tokio::sync::mpsc::Sender<TaskResult>,
     telegram_rx: tokio::sync::mpsc::Receiver<TaskResult>,
@@ -45,13 +45,12 @@ impl eframe::App for TelegramGroupInfoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.check_async_updates();
         egui::CentralPanel::default().show(ctx, |ui| match &self.telegram_state {
-            TelegramState::InitClient => {
-                if ui.button("Connect to telegram").clicked() {
-                    self.client = get_client().unwrap();
-                    self.telegram_state = TelegramState::NeedOTP
-                }
-            }
-
+            // TelegramState::InitClient => {
+            //     if ui.button("Connect to telegram").clicked() {
+            //         self.client = get_client().unwrap();
+            //         self.telegram_state = TelegramState::NeedOTP
+            //     }
+            // }
             TelegramState::NeedOTP => {
                 ui.label("Phone number (with international prefix)");
                 ui.text_edit_singleline(&mut self.phone_number);
@@ -59,7 +58,7 @@ impl eframe::App for TelegramGroupInfoApp {
                     println!("OTP requested.");
                     self.spawner.spawn_task(Task {
                         task_type: TaskType::RequestOTP(self.phone_number.clone()),
-                        client: self.client.clone(),
+                        // client: self.client.as_ref().unwrap().clone(),
                         result: self.telegram_tx.clone(),
                     })
                 }
@@ -71,7 +70,6 @@ impl eframe::App for TelegramGroupInfoApp {
                     println!("OTP validation requested.");
                     self.spawner.spawn_task(Task {
                         task_type: TaskType::ValidateOTP(token.clone(), self.otp_field.clone()),
-                        client: self.client.clone(),
                         result: self.telegram_tx.clone(),
                     })
                 }
@@ -90,7 +88,7 @@ impl TelegramGroupInfoApp {
             spawner: TaskSpawner::new(),
             telegram_rx: recv,
             telegram_tx: send,
-            client: get_client().expect("Telegram init fail"),
+            client: None,
             picked_path: None,
             chat_name: "".to_string(),
             phone_number: "".to_string(),
@@ -117,8 +115,7 @@ impl TelegramGroupInfoApp {
                         println!("Fail");
                     }
                 },
-                TaskResult::ValidateOTP(Some(client)) => {
-                    self.client = client;
+                TaskResult::ValidateOTP(Some(_)) => {
                     self.telegram_state = TelegramState::LoggedIn;
                 }
                 _ => {}
@@ -145,14 +142,14 @@ impl TelegramGroupInfoApp {
                     let lines: Vec<_> = self.chat_name.lines().collect();
                     for (i, chat_name) in lines.iter().enumerate() {
                         ui.monospace(format!("({}/{}) Doing {} ...", i, lines.len(), chat_name));
-                        let maybe_participants =
-                            get_participants(self.client.clone(), chat_name.to_string());
-                        match maybe_participants {
-                            Ok(result) => {
-                                self.result.push(result);
-                            }
-                            Err(x) => {}
-                        }
+                        // let maybe_participants =
+                        //     get_participants(self.client.clone(), chat_name.to_string());
+                        // match maybe_participants {
+                        //     Ok(result) => {
+                        //         self.result.push(result);
+                        //     }
+                        //     Err(x) => {}
+                        // }
                     }
                 }
             });
@@ -172,7 +169,16 @@ fn main() -> () {
         ..Default::default()
     };
     // let app = Box::<MyApp>::default();
+    // let rt = tokio::runtime::Builder::new_current_thread()
+    //     .enable_all()
+    //     .build()
+    //     .unwrap();
+
+    // let client = rt.block_on(get_client()).unwrap();
+    // rt.shutdown_background();
+
     let app = TelegramGroupInfoApp::new();
+
     eframe::run_native(
         "Pigna telegram scraper",
         options,

@@ -1,13 +1,15 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use grammers_client::types::*;
-use grammers_client::{Client, Config, SignInError};
+use grammers_client::{Client as GrammersClient, Config, SignInError};
 use grammers_session::Session;
 
 use grammers_client::client::chats::ParticipantIter;
 
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
+
+type Client = Arc<Mutex<GrammersClient>>;
 
 pub enum TaskType {
     RequestOTP(String), // phone number
@@ -17,49 +19,40 @@ pub enum TaskType {
 pub struct Task {
     // info that describes the task
     pub task_type: TaskType,
-    pub client: Client,
+    // pub client: Client,
     pub result: mpsc::Sender<TaskResult>, // channel for result
 }
-// impl Task {
-//     pub fn new(task_type: TaskType, client: Client, result: ) -> Self {
-//         Self { task_type, client }
-//     }
-// }
 
 pub enum TaskResult {
     OTP(Option<Option<LoginToken>>),
-    ValidateOTP(Option<Client>),
+    ValidateOTP(Option<()>),
     // GetParticipants(TelegramResult<(ParticipantIter, usize)>),
 }
 
-async fn handle_task(task: Task) {
+async fn handle_task(task: Task, client: GrammersClient) {
     match task.task_type {
         TaskType::RequestOTP(phone) => {
+            println!("Got RequestOTP request");
             task.result
-                .send(TaskResult::OTP(
-                    request_login_code(task.client, &phone).await.ok(),
-                ))
+                .send(TaskResult::OTP(get_login_code(client, &phone).await.ok()))
                 .await
                 .expect("channel send fail");
         }
         TaskType::ValidateOTP(token, otp) => {
             task.result
                 .send(TaskResult::ValidateOTP(
-                    login(task.client, &token, &otp).await.ok(),
+                    login(client, &token, &otp).await.ok(),
                 ))
                 .await
                 .expect("channel send fail");
-        } // TaskType::GetParticipants(chat_name) => {
-          //     task.result.send(TaskResult::GetParticipants(
-          //         get_participants(task.client, chat_name).await,
-          //     ));
-          // }
+        }
     }
 }
 
 #[derive(Clone)]
 pub struct TaskSpawner {
     spawn: mpsc::Sender<Task>,
+    client: Client,
 }
 
 impl TaskSpawner {
@@ -73,11 +66,14 @@ impl TaskSpawner {
         // to more cleanly forward errors if the `unwrap()`
         // panics.
         let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        let client = Arc::new(Mutex::new(rt.block_on(get_client()).unwrap()));
+        let c2 = client.clone();
 
         std::thread::spawn(move || {
             rt.block_on(async move {
                 while let Some(task) = recv.recv().await {
-                    tokio::spawn(handle_task(task));
+                    // tokio::spawn(handle_task(task, client.lock().unwrap().clone()));
+                    tokio::spawn(handle_task(task, c2.lock().unwrap().clone()));
                 }
 
                 // Once all senders have gone out of scope,
@@ -87,7 +83,10 @@ impl TaskSpawner {
             });
         });
 
-        Self { spawn: send }
+        Self {
+            spawn: send,
+            client: client.clone(),
+        }
     }
 
     pub fn spawn_task(&self, task: Task) {
@@ -100,17 +99,17 @@ impl TaskSpawner {
 
 const SESSION_FILE: &str = "downloader.session";
 
-type TelegramResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+pub type TelegramResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-#[tokio::main]
-pub async fn get_client() -> TelegramResult<Client> {
+// #[tokio::main]
+pub async fn get_client() -> TelegramResult<GrammersClient> {
     let api_id = env!("TG_ID").parse().expect("TG_ID invalid");
     let api_hash = env!("TG_HASH").to_string();
 
     // let chat_name = env::args().nth(1).expect("chat name missing");
 
     println!("Connecting to Telegram...");
-    let client = Client::connect(Config {
+    let client = GrammersClient::connect(Config {
         session: Session::load_file_or_create(SESSION_FILE)?,
         api_id,
         api_hash: api_hash.clone(),
@@ -121,7 +120,10 @@ pub async fn get_client() -> TelegramResult<Client> {
     return Ok(client);
 }
 
-pub async fn request_login_code(client: Client, phone: &str) -> TelegramResult<Option<LoginToken>> {
+pub async fn get_login_code(
+    client: GrammersClient,
+    phone: &str,
+) -> TelegramResult<Option<LoginToken>> {
     println!("Checking if authorized...");
     if !client.is_authorized().await? {
         println!("No. Request login code");
@@ -133,7 +135,7 @@ pub async fn request_login_code(client: Client, phone: &str) -> TelegramResult<O
     }
 }
 
-pub async fn login(client: Client, token: &LoginToken, code: &str) -> TelegramResult<Client> {
+pub async fn login(client: GrammersClient, token: &LoginToken, code: &str) -> TelegramResult<()> {
     if !client.is_authorized().await? {
         let signed_in = client.sign_in(&token, &code).await;
         match signed_in {
@@ -163,12 +165,11 @@ pub async fn login(client: Client, token: &LoginToken, code: &str) -> TelegramRe
             }
         }
     }
-    return Ok(client);
+    return Ok(());
 }
 
-#[tokio::main]
 pub async fn get_participants(
-    client: Client,
+    client: GrammersClient,
     chat_name: String,
 ) -> TelegramResult<(ParticipantIter, usize)> {
     let maybe_chat = client.resolve_username(chat_name.as_str()).await?;
@@ -180,17 +181,3 @@ pub async fn get_participants(
 
     Ok((participants, total_participants))
 }
-
-// fn prompt(message: &str) -> TelegramResult<String> {
-//     let stdout = io::stdout();
-//     let mut stdout = stdout.lock();
-//     stdout.write_all(message.as_bytes())?;
-//     stdout.flush()?;
-
-//     let stdin = io::stdin();
-//     let mut stdin = stdin.lock();
-
-//     let mut line = String::new();
-//     stdin.read_line(&mut line)?;
-//     Ok(line)
-// }
