@@ -1,106 +1,129 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
+use std::sync::Arc;
+
 use eframe::egui;
 use egui::Ui;
-use grammers_client::{client::chats::ParticipantIter, types::LoginToken, Client, SignInError};
-use tokio::runtime;
+use grammers_client::{client::chats::ParticipantIter, types::LoginToken, Client};
 
-use telegram_group_scraper::{get_client, get_participants};
+use telegram_group_scraper::{
+    get_client, get_participants, Task, TaskResult, TaskSpawner, TaskType,
+};
+
+// #[derive(Default)]
+// struct AuthenticationData {
+//     phone: String,
+//     otp: String,
+//     auth_token: Option<LoginToken>,
+//     signed_in: bool,
+// }
 
 #[derive(Default)]
-struct MyApp {
-    picked_path: Option<String>,
-    chat_name: String,
-    phone: String,
-    otp: String,
-    auth_token: Option<LoginToken>,
-    signed_in: bool,
-    result: Option<(ParticipantIter, usize)>,
-    tg_client: Option<Client>,
+enum TelegramState {
+    #[default]
+    InitClient,
+    NeedOTP, // phone number
+    ValidateOTP(Arc<LoginToken>),
+    LoggedIn,
 }
 
-impl eframe::App for MyApp {
+struct TelegramGroupInfoApp {
+    picked_path: Option<String>,
+    chat_name: String,
+    phone_number: String,
+    otp_field: String,
+    result: Vec<(ParticipantIter, usize)>,
+    telegram_state: TelegramState,
+    spawner: TaskSpawner,
+    client: Client,
+
+    telegram_tx: tokio::sync::mpsc::Sender<TaskResult>,
+    telegram_rx: tokio::sync::mpsc::Receiver<TaskResult>,
+}
+
+impl eframe::App for TelegramGroupInfoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if self.signed_in {
+        self.check_async_updates();
+        egui::CentralPanel::default().show(ctx, |ui| match &self.telegram_state {
+            TelegramState::InitClient => {
+                if ui.button("Connect to telegram").clicked() {
+                    self.client = get_client().unwrap();
+                    self.telegram_state = TelegramState::NeedOTP
+                }
+            }
+
+            TelegramState::NeedOTP => {
+                ui.label("Phone number (with international prefix)");
+                ui.text_edit_singleline(&mut self.phone_number);
+                if ui.button("Request OTP").clicked() {
+                    println!("OTP requested.");
+                    self.spawner.spawn_task(Task {
+                        task_type: TaskType::RequestOTP(self.phone_number.clone()),
+                        client: self.client.clone(),
+                        result: self.telegram_tx.clone(),
+                    })
+                }
+            }
+            TelegramState::ValidateOTP(token) => {
+                ui.label("Insert OTP here");
+                ui.text_edit_singleline(&mut self.otp_field);
+                if ui.button("Validate OTP").clicked() {
+                    println!("OTP validation requested.");
+                    self.spawner.spawn_task(Task {
+                        task_type: TaskType::ValidateOTP(token.clone(), self.otp_field.clone()),
+                        client: self.client.clone(),
+                        result: self.telegram_tx.clone(),
+                    })
+                }
+            }
+            TelegramState::LoggedIn => {
                 self.main_flow(ui);
-            } else {
-                self.telegram_auth_flow(ui);
             }
         });
     }
 }
 
-impl MyApp {
-    fn telegram_auth_flow(&mut self, ui: &mut Ui) {
-        if self.tg_client.is_none() {
-            if ui.button("Connect").clicked() {
-                ui.label("Connecting to telegram...");
-                match telegram_group_scraper::get_client() {
-                    Ok(client) => {
-                        self.tg_client = Some(client);
+impl TelegramGroupInfoApp {
+    fn new() -> Self {
+        let (send, mut recv) = tokio::sync::mpsc::channel(16);
+        Self {
+            spawner: TaskSpawner::new(),
+            telegram_rx: recv,
+            telegram_tx: send,
+            client: get_client().expect("Telegram init fail"),
+            picked_path: None,
+            chat_name: "".to_string(),
+            phone_number: "".to_string(),
+            otp_field: "".to_string(),
+            result: Vec::new(),
+            telegram_state: TelegramState::NeedOTP,
+        }
+    }
+    /// Checks if we got something in the channel, and changes state in that case.
+    fn check_async_updates(&mut self) {
+        if let TelegramState::LoggedIn = self.telegram_state {
+            return;
+        }
+        if let Ok(msg) = self.telegram_rx.try_recv() {
+            match msg {
+                TaskResult::OTP(otp_res) => match otp_res {
+                    Some(None) => {
+                        self.telegram_state = TelegramState::LoggedIn;
                     }
-                    Err(msg) => {
-                        ui.label("Connection failed! ");
-                        ui.monospace(msg.to_string());
+                    Some(Some(token)) => {
+                        self.telegram_state = TelegramState::ValidateOTP(Arc::new(token))
                     }
-                };
+                    None => {
+                        println!("Fail");
+                    }
+                },
+                TaskResult::ValidateOTP(Some(client)) => {
+                    self.client = client;
+                    self.telegram_state = TelegramState::LoggedIn;
+                }
+                _ => {}
             }
         }
-        // request OTP
-        ui.vertical(|ui| {
-            if self.tg_client.is_none() {
-                return;
-            }
-            ui.label("Your phone number (in international format)");
-            ui.text_edit_singleline(&mut self.phone);
-            if ui.button("Start authentication").clicked() {
-                println!("Start auth...");
-                ui.monospace("Requesting OTP to telegram...");
-                match tokio::runtime::Runtime::new().unwrap().block_on(
-                    self.tg_client
-                        .as_ref()
-                        .unwrap()
-                        .request_login_code(&self.phone.trim()),
-                ) {
-                    Ok(token) => {
-                        self.auth_token = Some(token);
-                    }
-                    Err(msg) => {
-                        ui.label("Got error: ");
-                        ui.monospace(msg.to_string());
-                    }
-                }
-            }
-        });
-        // use OTP to authenticate
-        ui.vertical(|ui| {
-            if self.auth_token.is_none() {
-                return;
-            }
-            ui.label("Enter the OTP code you received");
-            ui.text_edit_singleline(&mut self.otp);
-            if ui.button("Submit").clicked() {
-                ui.monospace("Validating OTP with telegram...");
-                match tokio::runtime::Runtime::new().unwrap().block_on(
-                    self.tg_client
-                        .as_ref()
-                        .unwrap()
-                        .sign_in(&self.auth_token.as_ref().unwrap(), &self.otp),
-                ) {
-                    Ok(_) => {
-                        self.signed_in = true;
-                    }
-                    Err(SignInError::PasswordRequired(password_token)) => {
-                        ui.label("PASSWORD RICHIESTA??? CONTATTA UMB");
-                    }
-                    Err(msg) => {
-                        ui.label("Got error: ");
-                        ui.monospace(msg.to_string());
-                    }
-                }
-            }
-        });
     }
 
     fn main_flow(&mut self, ui: &mut Ui) {
@@ -122,24 +145,19 @@ impl MyApp {
                     let lines: Vec<_> = self.chat_name.lines().collect();
                     for (i, chat_name) in lines.iter().enumerate() {
                         ui.monospace(format!("({}/{}) Doing {} ...", i, lines.len(), chat_name));
-                        let maybe_participants = get_participants(
-                            self.tg_client.clone().unwrap(),
-                            chat_name.to_string(),
-                        );
+                        let maybe_participants =
+                            get_participants(self.client.clone(), chat_name.to_string());
                         match maybe_participants {
                             Ok(result) => {
-                                self.result = Some(result);
+                                self.result.push(result);
                             }
                             Err(x) => {}
                         }
                     }
                 }
             });
-            if self.result.is_some() {
-                ui.label(format!(
-                    "There are {} participants in the group",
-                    self.result.as_ref().unwrap().1
-                ));
+            for result in self.result.iter() {
+                ui.label(format!("There are {} participants in the group", result.1));
             }
         }
     }
@@ -154,7 +172,7 @@ fn main() -> () {
         ..Default::default()
     };
     // let app = Box::<MyApp>::default();
-    let app = MyApp::default();
+    let app = TelegramGroupInfoApp::new();
     eframe::run_native(
         "Pigna telegram scraper",
         options,
