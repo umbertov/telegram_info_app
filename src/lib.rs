@@ -1,3 +1,5 @@
+use std::fmt::format;
+use std::io;
 use std::sync::{Arc, Mutex};
 
 use grammers_client::types::*;
@@ -15,6 +17,7 @@ pub enum TaskType {
     RequestOTP(String),                   // phone number
     ValidateOTP(Arc<LoginToken>, String), // auth_token, otp
     GetParticipants(String),              // group name
+    WriteCSV(String, ParticipantIter),    // group name, pariticipants
 }
 pub struct Task {
     // info that describes the task
@@ -27,6 +30,7 @@ pub enum TaskResult {
     OTP(Option<Option<LoginToken>>),
     ValidateOTP(Option<()>),
     GetParticipantsResult(String, Option<(ParticipantIter, usize)>),
+    WriteCSVResult(String, bool),
 }
 
 async fn handle_task(task: Task, client: GrammersClient) {
@@ -47,15 +51,91 @@ async fn handle_task(task: Task, client: GrammersClient) {
                 .expect("channel send fail");
         }
         TaskType::GetParticipants(chat_name) => {
+            let mut participants = get_participants(client, chat_name.clone())
+                .await
+                .expect("bojh");
+            handle_write_csv(chat_name.clone(), &mut participants.0, task.result.clone()).await;
             task.result
                 .send(TaskResult::GetParticipantsResult(
                     chat_name.clone(),
-                    get_participants(client, chat_name).await.ok(),
+                    Some(participants),
                 ))
                 .await
                 .expect("channel send fail");
         }
+        TaskType::WriteCSV(group_name, mut participants) => {
+            // handle_write_csv(group_name, &mut participants, task.result).await;
+        }
     }
+}
+
+use serde::Serialize;
+#[derive(Debug, Serialize)]
+struct ParticipantRow<'a> {
+    username: Option<&'a str>,
+    first_name: &'a str,
+    last_name: Option<&'a str>,
+    scam: bool,
+    phone: Option<&'a str>,
+    verified: bool,
+    is_bot: bool,
+    is_support: bool,
+    role: &'a str, // role: Option<&'a str>,
+}
+
+async fn handle_write_csv(
+    group_name: String,
+    participants: &mut ParticipantIter,
+    result: mpsc::Sender<TaskResult>,
+) {
+    let participants = participants_to_vec(participants).await;
+    let mut csv_writer = csv::Writer::from_writer(
+        std::fs::File::create(format!("{}.csv", group_name)).expect("Couldnt open for writing"),
+    );
+    for participant in participants.iter() {
+        let participant = ParticipantRow {
+            username: participant.user.username(),
+            first_name: participant.user.first_name(),
+            last_name: participant.user.last_name(),
+            scam: participant.user.scam(),
+            phone: participant.user.phone(),
+            verified: participant.user.verified(),
+            is_bot: participant.user.is_bot(),
+            is_support: participant.user.support(),
+            role: &format!("{:?}", participant.role),
+        };
+
+        println!("Writing {:?}", participant);
+
+        csv_writer.serialize(participant).unwrap();
+    }
+    result
+        .send(TaskResult::WriteCSVResult(group_name, true))
+        .await
+        .unwrap();
+}
+async fn participants_to_vec(participants: &mut ParticipantIter) -> Vec<Participant> {
+    let mut i = 0;
+    let total = participants.total().await.unwrap();
+    let mut out = Vec::new();
+    loop {
+        i += 1;
+        println!("Downlaod [{}/{}]...", i, total);
+        match participants.next().await {
+            Ok(Some(participant)) => {
+                out.push(participant);
+                // do stuff
+            }
+            Ok(None) => {
+                break; // normal finish
+            }
+            Err(msg) => {
+                println!("Fail {}", msg);
+                break; // error
+            }
+        }
+    }
+    return out;
 }
 
 #[derive(Clone)]

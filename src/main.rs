@@ -137,7 +137,7 @@ impl TelegramGroupInfoApp {
 
         ui.label("Destination folder:");
         if ui.button("Open file…").clicked() {
-            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+            if let Some(path) = rfd::FileDialog::new().set_directory("./").pick_folder() {
                 self.picked_path = Some(path.display().to_string());
             }
         }
